@@ -1,0 +1,5 @@
+[dependencies]
+math = { path = "../lib-math/src" }
+
+# own package
+math-js = { path = "src" }
