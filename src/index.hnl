@@ -1,0 +1,397 @@
+--- math-js -- JavaScript-backed implementation of the `math` ports.
+---
+--- Every arrow that `Math.*` (or `Number.*`) covers goes through the
+--- host-injected `js.call` marshaller (`js_number`/`js_boolean`
+--- descriptors); the total arrows (`add`/`sub`/`mul`/`div`/`mod`,
+--- `clamp`, `lerp`, `map_range`, the `is_*` predicates that have no
+--- `Number.*` counterpart) are pure handl, matching `math-handl`.
+---
+--- Deliberate divergences / notes:
+--- - `Math` has no `exp2`, `copysign`, `nextafter`, `round_to`,
+---   `degrees`, `radians`, `floor_div`, `fract`, `factorial`, `gcd`,
+---   `lcm`, or bitwise ops. `exp2`/`fract`/`floor_div`/`round_to`/
+---   `copysign`/`degrees`/`radians` are composed from `Math.*` calls or
+---   arithmetic; `factorial`/`gcd`/`lcm` are pure-handl loops; the
+---   int32 bitwise family (`bit_and`/`bit_or`/`bit_xor`/`bit_not`/`shl`/
+---   `shr`/`rotl32`/`u32`) is emulated in pure handl with JS int32
+---   semantics (see `_bits`/`_shl`/`_shr`/`_rotl` below — `Math` exposes
+---   no bitwise functions at all).
+--- - `nextafter` has no `Math.*` counterpart and cannot be expressed
+---   without bit-level access to the double; it raises via
+---   `error.raise` rather than silently approximating.
+--- - `pi`/`e`/`tau` are literals (properties, not functions —
+---   `js.call` only dispatches functions). `nan` is `Math.sqrt(-1)`
+---   and `infinity` is `Math.exp(1000)` (IEEE overflow), both honest
+---   `Math.*` routes to the special values.
+--- - `sign`/`min`/`max`/`round` follow JS `Math.*` semantics, which
+---   differ from C at the edges (`Math.sign(NaN)` is `NaN`,
+---   `Math.round` is half-toward-+Infinity, `Math.min`/`max` propagate
+---   `NaN`). That is the correct JS-host analog.
+--- - Unlike `math-c`/`math-handl`, this backend is a single module:
+---   `math-js/<arrow>` submodule paths do not exist; consumers import
+---   from `"math-js"`.
+
+from "js" import { call }
+
+from "math/abs" import { Abs }
+from "math/acosh" import { Acosh }
+from "math/acos" import { Acos }
+from "math/add" import { Add }
+from "math/asinh" import { Asinh }
+from "math/asin" import { Asin }
+from "math/atan2" import { Atan2 }
+from "math/atanh" import { Atanh }
+from "math/atan" import { Atan }
+from "math/bit_and" import { BitAnd }
+from "math/bit_not" import { BitNot }
+from "math/bit_or" import { BitOr }
+from "math/bit_xor" import { BitXor }
+from "math/cbrt" import { Cbrt }
+from "math/ceil" import { Ceil }
+from "math/clamp" import { Clamp }
+from "math/copysign" import { Copysign }
+from "math/cosh" import { Cosh }
+from "math/cos" import { Cos }
+from "math/degrees" import { Degrees }
+from "math/div" import { Div }
+from "math/e" import { E }
+from "math/exp2" import { Exp2 }
+from "math/exp" import { Exp }
+from "math/expm1" import { Expm1 }
+from "math/factorial" import { Factorial }
+from "math/floor_div" import { FloorDiv }
+from "math/floor" import { Floor }
+from "math/fract" import { Fract }
+from "math/gcd" import { Gcd }
+from "math/hypot" import { Hypot }
+from "math/infinity" import { Infinity }
+from "math/is_finite" import { IsFinite }
+from "math/is_infinite" import { IsInfinite }
+from "math/is_integer" import { IsInteger }
+from "math/is_nan" import { IsNan }
+from "math/is_negative" import { IsNegative }
+from "math/is_positive" import { IsPositive }
+from "math/lcm" import { Lcm }
+from "math/lerp" import { Lerp }
+from "math/log10" import { Log10 }
+from "math/log1p" import { Log1p }
+from "math/log2" import { Log2 }
+from "math/log" import { Log }
+from "math/map_range" import { MapRange }
+from "math/max" import { Max }
+from "math/min" import { Min }
+from "math/mod" import { Mod }
+from "math/mul" import { Mul }
+from "math/nan" import { Nan }
+from "math/nextafter" import { Nextafter }
+from "math/pi" import { Pi }
+from "math/pow" import { Pow }
+from "math/radians" import { Radians }
+from "math/rotl32" import { Rotl32 }
+from "math/round" import { Round }
+from "math/round_to" import { RoundTo }
+from "math/shl" import { Shl }
+from "math/shr" import { Shr }
+from "math/sign" import { Sign }
+from "math/sinh" import { Sinh }
+from "math/sin" import { Sin }
+from "math/sqrt" import { Sqrt }
+from "math/sub" import { Sub }
+from "math/tanh" import { Tanh }
+from "math/tan" import { Tan }
+from "math/tau" import { Tau }
+from "math/trunc" import { Trunc }
+from "math/u32" import { U32 }
+
+-- ---------------------------------------------------------------------------
+-- Internal helpers (pure handl; no `math.*` host ops — a JS host may not
+-- provide them, which is the whole point of this backend).
+-- ---------------------------------------------------------------------------
+
+-- Normalize an integer-valued number into `[0, 2^32)` (JS `>>> 0` shape).
+_norm_u32 :: (x) ~> (((x % 4294967296) + 4294967296) % 4294967296)
+
+-- Interpret a `[0, 2^32)` value as a signed int32 (JS `| 0` shape).
+_i32 :: (u) ~> if u >= 2147483648 { u - 4294967296 } else { u }
+
+-- `2^s` for `s` in `[0, 32]` — exact in f64 (max 2^32).
+_pow2 :: (s) ~> do {
+  while { i: 0, acc: 1 } {
+    [i, acc] ~> if i >= s {
+      { out: acc }
+    } else {
+      { state: { i: i + 1, acc: acc * 2 } }
+    }
+  }
+}
+
+-- JS shift-count normalization: `b & 31`, valid for negative `b` too.
+_shift_count :: (b) ~> ((b % 32) + 32) % 32
+
+-- Int32 bitwise op emulation. `mode`: 0 = and, 1 = or, 2 = xor.
+-- Walks both operands bit-by-bit (LSB first); every intermediate stays
+-- below 2^33 so f64 arithmetic is exact.
+_bits :: (a, b, mode) ~> do {
+  ua0 = _norm_u32(a)
+  ub0 = _norm_u32(b)
+  while { i: 0, ua: ua0, ub: ub0, acc: 0, place: 1 } {
+    [i, ua, ub, acc, place] ~> if i >= 32 {
+      { out: _i32(acc) }
+    } else {
+      ba = ua % 2
+      bb = ub % 2
+      bit = if mode == 0 {
+        if ba == 1 && bb == 1 { 1 } else { 0 }
+      } else {
+        if mode == 1 {
+          if ba == 1 || bb == 1 { 1 } else { 0 }
+        } else {
+          if ba != bb { 1 } else { 0 }
+        }
+      }
+      { state: { i: i + 1, ua: (ua - ba) / 2, ub: (ub - bb) / 2, acc: acc + bit * place, place: place * 2 } }
+    }
+  }
+}
+
+-- JS `<<`: shift left within 32 bits, result reinterpreted as int32.
+_shl :: (a, b) ~> do {
+  s = _shift_count(b)
+  v0 = _norm_u32(a)
+  while { i: 0, v: v0 } {
+    [i, v] ~> if i >= s {
+      { out: _i32(v) }
+    } else {
+      { state: { i: i + 1, v: (v * 2) % 4294967296 } }
+    }
+  }
+}
+
+-- JS `>>`: arithmetic shift right (sign-propagating) on the int32 view.
+-- `a >> s` equals `floor(a / 2^s)` for the signed value.
+_shr :: (a, b) ~> do {
+  s = _shift_count(b)
+  sa = _i32(_norm_u32(a))
+  d = sa / _pow2(s)
+  f = d % 1
+  q = d - f
+  r = if f < 0 { q - 1 } else { q }
+  _i32(_norm_u32(r))
+}
+
+-- 32-bit rotate-left (one JS `Math.imul`-free step at a time; the top
+-- bit wraps to the bottom). Returns the int32 view of the result.
+_rotl :: (a, b) ~> do {
+  s = _shift_count(b)
+  v0 = _norm_u32(a)
+  while { i: 0, v: v0 } {
+    [i, v] ~> if i >= s {
+      { out: _i32(v) }
+    } else {
+      top = if v >= 2147483648 { 1 } else { 0 }
+      nv = (v % 2147483648) * 2 + top
+      { state: { i: i + 1, v: nv } }
+    }
+  }
+}
+
+-- Euclid gcd on absolute values; `gcd(0, 0) = 0`.
+_gcd :: (a, b) ~> do {
+  x0 = if a < 0 { 0 - a } else { a }
+  y0 = if b < 0 { 0 - b } else { b }
+  while { x: x0, y: y0 } {
+    [x, y] ~> if y == 0 {
+      { out: x }
+    } else {
+      { state: { x: y, y: x % y } }
+    }
+  }
+}
+
+-- ---------------------------------------------------------------------------
+-- Exports — one per `math/<arrow>` contract signature.
+-- ---------------------------------------------------------------------------
+
+export abs: Abs := (a) ~> call("Math", "abs", [a], ["js_number"], "js_number", false)
+
+export acos: Acos := (a) ~> call("Math", "acos", [a], ["js_number"], "js_number", false)
+
+export acosh: Acosh := (a) ~> call("Math", "acosh", [a], ["js_number"], "js_number", false)
+
+export add: Add := (a, b) ~> a + b
+
+export asin: Asin := (a) ~> call("Math", "asin", [a], ["js_number"], "js_number", false)
+
+export asinh: Asinh := (a) ~> call("Math", "asinh", [a], ["js_number"], "js_number", false)
+
+export atan: Atan := (a) ~> call("Math", "atan", [a], ["js_number"], "js_number", false)
+
+export atan2: Atan2 := (a, b) ~> call("Math", "atan2", [a, b], ["js_number", "js_number"], "js_number", false)
+
+export atanh: Atanh := (a) ~> call("Math", "atanh", [a], ["js_number"], "js_number", false)
+
+export bit_and: BitAnd := (a, b) ~> _bits(a, b, 0)
+
+export bit_not: BitNot := (a) ~> _bits(a, -1, 2)
+
+export bit_or: BitOr := (a, b) ~> _bits(a, b, 1)
+
+export bit_xor: BitXor := (a, b) ~> _bits(a, b, 2)
+
+export cbrt: Cbrt := (a) ~> call("Math", "cbrt", [a], ["js_number"], "js_number", false)
+
+export ceil: Ceil := (a) ~> call("Math", "ceil", [a], ["js_number"], "js_number", false)
+
+export clamp: Clamp := (x, lo, hi) ~> if x < lo {
+  lo
+} else {
+  if x > hi {
+    hi
+  } else {
+    x
+  }
+}
+
+export copysign: Copysign := (a, b) ~> do {
+  r = call("Math", "abs", [a], ["js_number"], "js_number", false)
+  s = call("Math", "sign", [b], ["js_number"], "js_number", false)
+  if s < 0 { 0 - r } else { r }
+}
+
+export cos: Cos := (a) ~> call("Math", "cos", [a], ["js_number"], "js_number", false)
+
+export cosh: Cosh := (a) ~> call("Math", "cosh", [a], ["js_number"], "js_number", false)
+
+export degrees: Degrees := (a) ~> a * 57.29577951308232
+
+export div: Div := (a, b) ~> a / b
+
+export e: E := () ~> 2.718281828459045
+
+export exp: Exp := (a) ~> call("Math", "exp", [a], ["js_number"], "js_number", false)
+
+-- `Math.exp2` does not exist; `exp2(x) = exp(x * ln 2)`.
+export exp2: Exp2 := (a) ~> call("Math", "exp", [a * 0.6931471805599453], ["js_number"], "js_number", false)
+
+export expm1: Expm1 := (a) ~> call("Math", "expm1", [a], ["js_number"], "js_number", false)
+
+export factorial: Factorial := (a) ~> do {
+  while { n: a, acc: 1 } {
+    [n, acc] ~> if n <= 1 {
+      { out: acc }
+    } else {
+      { state: { n: n - 1, acc: acc * n } }
+    }
+  }
+}
+
+-- `Math` has no integer floor-division; `floor(a / b)` is the real
+-- analog (C `floor_div` on doubles agrees).
+export floor_div: FloorDiv := (a, b) ~> call("Math", "floor", [a / b], ["js_number"], "js_number", false)
+
+export floor: Floor := (a) ~> call("Math", "floor", [a], ["js_number"], "js_number", false)
+
+-- `fract(x) = x - trunc(x)` (sign of `x`, matching C `modf`'s fraction).
+export fract: Fract := (a) ~> do {
+  t = call("Math", "trunc", [a], ["js_number"], "js_number", false)
+  a - t
+}
+
+export gcd: Gcd := _gcd
+
+export hypot: Hypot := (a, b) ~> call("Math", "hypot", [a, b], ["js_number", "js_number"], "js_number", false)
+
+export infinity: Infinity := () ~> call("Math", "exp", [1000], ["js_number"], "js_number", false)
+
+export is_finite: IsFinite := (a) ~> call("Number", "isFinite", [a], ["js_number"], "js_boolean", false)
+
+-- `x == x + x` is true only for `±Infinity` (and `x == 0` guards the
+-- `0 == 0` false positive); same trick as `math-handl`.
+export is_infinite: IsInfinite := (a) ~> if a == 0 { false } else { a == a + a }
+
+export is_integer: IsInteger := (a) ~> call("Number", "isInteger", [a], ["js_number"], "js_boolean", false)
+
+export is_nan: IsNan := (a) ~> call("Number", "isNaN", [a], ["js_number"], "js_boolean", false)
+
+export is_negative: IsNegative := (a) ~> a < 0
+
+export is_positive: IsPositive := (a) ~> a > 0
+
+export lcm: Lcm := (a, b) ~> do {
+  g = _gcd(a, b)
+  if g == 0 {
+    0
+  } else {
+    p = a * b
+    (if p < 0 { 0 - p } else { p }) / g
+  }
+}
+
+export lerp: Lerp := (a, b, t) ~> a + (b - a) * t
+
+export log: Log := (a) ~> call("Math", "log", [a], ["js_number"], "js_number", false)
+
+export log10: Log10 := (a) ~> call("Math", "log10", [a], ["js_number"], "js_number", false)
+
+export log1p: Log1p := (a) ~> call("Math", "log1p", [a], ["js_number"], "js_number", false)
+
+export log2: Log2 := (a) ~> call("Math", "log2", [a], ["js_number"], "js_number", false)
+
+export map_range: MapRange := (s, s1, s2, a, b) ~> a + ((s - s1) * (b - a)) / (s2 - s1)
+
+export max: Max := (a, b) ~> call("Math", "max", [a, b], ["js_number", "js_number"], "js_number", false)
+
+export min: Min := (a, b) ~> call("Math", "min", [a, b], ["js_number", "js_number"], "js_number", false)
+
+export mod: Mod := (a, b) ~> a % b
+
+export mul: Mul := (a, b) ~> a * b
+
+-- `Math.sqrt(-1)` is the honest JS route to NaN.
+export nan: Nan := () ~> call("Math", "sqrt", [-1], ["js_number"], "js_number", false)
+
+-- No `Math.nextafter` and no bit-level access to the double from handl;
+-- raise rather than silently approximate.
+export nextafter: Nextafter := (_a, _b) ~> error.raise("math-js: nextafter is not expressible via Math.* (needs bit-level double access)")
+
+export pi: Pi := () ~> 3.141592653589793
+
+export pow: Pow := (a, b) ~> call("Math", "pow", [a, b], ["js_number", "js_number"], "js_number", false)
+
+export radians: Radians := (a) ~> a * 0.017453292519943295
+
+export rotl32: Rotl32 := _rotl
+
+export round: Round := (a) ~> call("Math", "round", [a], ["js_number"], "js_number", false)
+
+-- Round to the nearest multiple of `b` (`round_to(x, 0) = x`).
+export round_to: RoundTo := (a, b) ~> if b == 0 {
+  a
+} else {
+  call("Math", "round", [a / b], ["js_number"], "js_number", false) * b
+}
+
+export shl: Shl := _shl
+
+export shr: Shr := _shr
+
+export sign: Sign := (a) ~> call("Math", "sign", [a], ["js_number"], "js_number", false)
+
+export sinh: Sinh := (a) ~> call("Math", "sinh", [a], ["js_number"], "js_number", false)
+
+export sin: Sin := (a) ~> call("Math", "sin", [a], ["js_number"], "js_number", false)
+
+export sqrt: Sqrt := (a) ~> call("Math", "sqrt", [a], ["js_number"], "js_number", false)
+
+export sub: Sub := (a, b) ~> a - b
+
+export tan: Tan := (a) ~> call("Math", "tan", [a], ["js_number"], "js_number", false)
+
+export tanh: Tanh := (a) ~> call("Math", "tanh", [a], ["js_number"], "js_number", false)
+
+export tau: Tau := () ~> 6.283185307179586
+
+export trunc: Trunc := (a) ~> call("Math", "trunc", [a], ["js_number"], "js_number", false)
+
+-- JS `>>> 0`: truncate toward zero, then normalize into `[0, 2^32)`.
+export u32: U32 := (a) ~> _norm_u32(a - (a % 1))
