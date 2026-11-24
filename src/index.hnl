@@ -109,13 +109,13 @@ from "math/u32" import { U32 }
 -- ---------------------------------------------------------------------------
 
 -- Normalize an integer-valued number into `[0, 2^32)` (JS `>>> 0` shape).
-_norm_u32 :: (x) ~> (((x % 4294967296) + 4294967296) % 4294967296)
+_norm_u32 := (x) ~> (((x % 4294967296) + 4294967296) % 4294967296)
 
 -- Interpret a `[0, 2^32)` value as a signed int32 (JS `| 0` shape).
-_i32 :: (u) ~> if u >= 2147483648 { u - 4294967296 } else { u }
+_i32 := (u) ~> if u >= 2147483648 { u - 4294967296 } else { u }
 
 -- `2^s` for `s` in `[0, 32]` — exact in f64 (max 2^32).
-_pow2 :: (s) ~> do {
+_pow2 := (s) ~> do {
   while { i: 0, acc: 1 } {
     [i, acc] ~> if i >= s {
       { out: acc }
@@ -126,21 +126,21 @@ _pow2 :: (s) ~> do {
 }
 
 -- JS shift-count normalization: `b & 31`, valid for negative `b` too.
-_shift_count :: (b) ~> ((b % 32) + 32) % 32
+_shift_count := (b) ~> ((b % 32) + 32) % 32
 
 -- Int32 bitwise op emulation. `mode`: 0 = and, 1 = or, 2 = xor.
 -- Walks both operands bit-by-bit (LSB first); every intermediate stays
 -- below 2^33 so f64 arithmetic is exact.
-_bits :: (a, b, mode) ~> do {
-  ua0 = _norm_u32(a)
-  ub0 = _norm_u32(b)
+_bits := (a, b, mode) ~> do {
+  ua0 := _norm_u32(a)
+  ub0 := _norm_u32(b)
   while { i: 0, ua: ua0, ub: ub0, acc: 0, place: 1 } {
     [i, ua, ub, acc, place] ~> if i >= 32 {
       { out: _i32(acc) }
     } else {
-      ba = ua % 2
-      bb = ub % 2
-      bit = if mode == 0 {
+      ba := ua % 2
+      bb := ub % 2
+      bit := if mode == 0 {
         if ba == 1 && bb == 1 { 1 } else { 0 }
       } else {
         if mode == 1 {
@@ -155,9 +155,9 @@ _bits :: (a, b, mode) ~> do {
 }
 
 -- JS `<<`: shift left within 32 bits, result reinterpreted as int32.
-_shl :: (a, b) ~> do {
-  s = _shift_count(b)
-  v0 = _norm_u32(a)
+_shl := (a, b) ~> do {
+  s := _shift_count(b)
+  v0 := _norm_u32(a)
   while { i: 0, v: v0 } {
     [i, v] ~> if i >= s {
       { out: _i32(v) }
@@ -169,36 +169,36 @@ _shl :: (a, b) ~> do {
 
 -- JS `>>`: arithmetic shift right (sign-propagating) on the int32 view.
 -- `a >> s` equals `floor(a / 2^s)` for the signed value.
-_shr :: (a, b) ~> do {
-  s = _shift_count(b)
-  sa = _i32(_norm_u32(a))
-  d = sa / _pow2(s)
-  f = d % 1
-  q = d - f
-  r = if f < 0 { q - 1 } else { q }
+_shr := (a, b) ~> do {
+  s := _shift_count(b)
+  sa := _i32(_norm_u32(a))
+  d := sa / _pow2(s)
+  f := d % 1
+  q := d - f
+  r := if f < 0 { q - 1 } else { q }
   _i32(_norm_u32(r))
 }
 
 -- 32-bit rotate-left (one JS `Math.imul`-free step at a time; the top
 -- bit wraps to the bottom). Returns the int32 view of the result.
-_rotl :: (a, b) ~> do {
-  s = _shift_count(b)
-  v0 = _norm_u32(a)
+_rotl := (a, b) ~> do {
+  s := _shift_count(b)
+  v0 := _norm_u32(a)
   while { i: 0, v: v0 } {
     [i, v] ~> if i >= s {
       { out: _i32(v) }
     } else {
-      top = if v >= 2147483648 { 1 } else { 0 }
-      nv = (v % 2147483648) * 2 + top
+      top := if v >= 2147483648 { 1 } else { 0 }
+      nv := (v % 2147483648) * 2 + top
       { state: { i: i + 1, v: nv } }
     }
   }
 }
 
 -- Euclid gcd on absolute values; `gcd(0, 0) = 0`.
-_gcd :: (a, b) ~> do {
-  x0 = if a < 0 { 0 - a } else { a }
-  y0 = if b < 0 { 0 - b } else { b }
+_gcd := (a, b) ~> do {
+  x0 := if a < 0 { 0 - a } else { a }
+  y0 := if b < 0 { 0 - b } else { b }
   while { x: x0, y: y0 } {
     [x, y] ~> if y == 0 {
       { out: x }
@@ -253,8 +253,8 @@ export clamp: Clamp := (x, lo, hi) ~> if x < lo {
 }
 
 export copysign: Copysign := (a, b) ~> do {
-  r = call("Math", "abs", [a], ["js_number"], "js_number", false)
-  s = call("Math", "sign", [b], ["js_number"], "js_number", false)
+  r := call("Math", "abs", [a], ["js_number"], "js_number", false)
+  s := call("Math", "sign", [b], ["js_number"], "js_number", false)
   if s < 0 { 0 - r } else { r }
 }
 
@@ -293,7 +293,7 @@ export floor: Floor := (a) ~> call("Math", "floor", [a], ["js_number"], "js_numb
 
 -- `fract(x) = x - trunc(x)` (sign of `x`, matching C `modf`'s fraction).
 export fract: Fract := (a) ~> do {
-  t = call("Math", "trunc", [a], ["js_number"], "js_number", false)
+  t := call("Math", "trunc", [a], ["js_number"], "js_number", false)
   a - t
 }
 
@@ -318,11 +318,11 @@ export is_negative: IsNegative := (a) ~> a < 0
 export is_positive: IsPositive := (a) ~> a > 0
 
 export lcm: Lcm := (a, b) ~> do {
-  g = _gcd(a, b)
+  g := _gcd(a, b)
   if g == 0 {
     0
   } else {
-    p = a * b
+    p := a * b
     (if p < 0 { 0 - p } else { p }) / g
   }
 }
