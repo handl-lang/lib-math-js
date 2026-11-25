@@ -10,7 +10,7 @@ single module.
 | --- | --- |
 | `src/index.hnl` | all 69 contract arrows in one module |
 | `pkg.hnl` | manifest — `modules: ["math-js"]`, deps `math` + `js` |
-| `scripts/hnl-gate.sh`, `ci.sh` | the gate / bupha entry |
+| `scripts/hnl-gate.sh`, `workflows/gate.yaml` | the gate / bupha entry |
 
 ## Contract
 
