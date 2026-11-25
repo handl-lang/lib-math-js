@@ -1,0 +1,57 @@
+--- math-js tests — smoke coverage for the pure-handl half of the
+--- `math-js` surface (total arrows, int32 bitwise emulation, constants).
+--- Arrows that go through `js.call`/`Math.*` need a JS host and are not
+--- exercised here.
+
+from "./index" import * as m
+
+-- arithmetic ---------------------------------------------------------------
+
+test_add := assert m.add(2, 3) == 5
+test_sub := assert m.sub(5, 3) == 2
+test_mul := assert m.mul(4, 3) == 12
+test_div := assert m.div(7.0, 2) == 3.5
+test_mod := assert m.mod(7, 3) == 1
+
+-- combinators ----------------------------------------------------------------
+
+test_clamp_inside := assert m.clamp(5, 0, 10) == 5
+test_clamp_high := assert m.clamp(11, 0, 10) == 10
+test_lerp := assert m.lerp(0, 10, 0.5) == 5
+test_map_range := assert m.map_range(5, 0, 10, 0, 100) == 50
+
+-- unit conversions ------------------------------------------------------------
+
+test_degrees := assert m.degrees(180) == 180 * 57.29577951308232
+test_radians := assert m.radians(180) == 180 * 0.017453292519943295
+
+-- constants --------------------------------------------------------------------
+
+test_e := assert m.e() == 2.718281828459045
+test_pi := assert m.pi() == 3.141592653589793
+test_tau := assert m.tau() == 6.283185307179586
+
+-- predicates (pure) --------------------------------------------------------------
+
+test_is_negative := assert m.is_negative(-1) == true
+test_is_negative_false := assert m.is_negative(1) == false
+test_is_positive := assert m.is_positive(1) == true
+test_is_positive_false := assert m.is_positive(-1) == false
+test_is_infinite_false := assert m.is_infinite(1) == false
+
+-- loops -------------------------------------------------------------------------
+
+test_factorial := assert m.factorial(5) == 120
+test_factorial_zero := assert m.factorial(0) == 1
+test_gcd := assert m.gcd(12, 8) == 4
+test_lcm := assert m.lcm(4, 6) == 12
+
+-- int32 bitwise emulation ---------------------------------------------------------
+
+test_bit_and := assert m.bit_and(6, 3) == 2
+test_bit_or := assert m.bit_or(6, 3) == 7
+test_bit_xor := assert m.bit_xor(6, 3) == 5
+test_bit_not := assert m.bit_not(5) == -6
+test_shl := assert m.shl(1, 4) == 16
+test_shr := assert m.shr(16, 2) == 4
+test_u32 := assert m.u32(-1) == 4294967295
