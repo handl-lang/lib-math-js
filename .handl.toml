@@ -1,6 +1,5 @@
 [dependencies]
 math = { path = "../lib-math/src" }
-js = { path = "../lib-js/src" }
 
 # own package
 math-js = { path = "src" }

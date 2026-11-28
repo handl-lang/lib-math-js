@@ -9,7 +9,7 @@ single module.
 | path | role |
 | --- | --- |
 | `src/index.hnl` | all 69 contract arrows in one module |
-| `pkg.hnl` | manifest — `modules: ["math-js"]`, deps `math` + `js` |
+| `pkg.hnl` | manifest — `modules: ["math-js"]`, dep `math` only (`js` is a host/builtin contract, NOT a dep — see Contract) |
 | `scripts/hnl-gate.sh`, `workflows/gate.yaml` | the gate / bupha entry |
 
 ## Contract
@@ -18,6 +18,15 @@ single module.
   from `"math-js"`; `math-js/<arrow>` submodule paths do not exist.
 - `Math.*`-covered ops marshal through `js.call` with
   `js_number`/`js_boolean` descriptors; total arrows are pure handl.
+- `js` stays out of `pkg.hnl` `deps` and `.handl.toml`
+  `[dependencies]`: the `js` contract is a host/builtin surface
+  (compile-js binds `from "js"` to `__handl_rt` shims regardless of
+  dep tables). Declaring the dep makes `hnl run`/`hnl test` resolve
+  `js` to `lib-js`'s signature-only exports — `call` erases to `null`
+  and every call dies with "callee is not an arrow-value". Undeclared,
+  the import lowers to the ambient `"js.call"` callee and fails
+  honestly as `call_host: function 'js.call' not found` on hosts
+  without JS natives (the shape `scripts/hnl-gate.sh` tolerates).
 - `Math`-less ops are composed (`exp2` = `exp(x·ln2)`), looped
   (`factorial`/`gcd`/`lcm`), or emulated with JS int32 semantics
   (`bit_and`/`bit_or`/`bit_xor`/`bit_not`/`shl`/`shr`/`rotl32`/`u32`).
